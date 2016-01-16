@@ -1,0 +1,2 @@
+#!/bin/sh
+/home/ulysses/development/cinder-android/tools/linux/cibuilder -app "$@"

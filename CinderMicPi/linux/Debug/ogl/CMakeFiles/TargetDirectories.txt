@@ -1,0 +1,1 @@
+/home/ulysses/development/rpi-osc/MultichannelOutput/linux/Debug/ogl/CMakeFiles/MultichannelOutput.dir
