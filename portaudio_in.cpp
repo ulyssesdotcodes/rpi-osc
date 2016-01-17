@@ -44,7 +44,7 @@
 #include <iostream>
 #include <stdio.h>
 #include <math.h>
-#include "portaudio.h"
+#include <portaudio.h>
 #include <wiringPi.h>
 #include <cmath>
 
@@ -87,6 +87,7 @@ float CubicAmplifier( float input )
 #define FUZZ(x) CubicAmplifier(CubicAmplifier(CubicAmplifier(CubicAmplifier(x))))
 
 static int gNumNoInputs = 0;
+static float prevSum = 0.0;
 /* This routine will be called by the PortAudio engine when audio is needed.
 ** It may be called at interrupt level on some machines so don't do anything
 ** that could mess up the system like calling malloc() or free().
@@ -121,9 +122,17 @@ static int fuzzCallback( const void *inputBuffer, void *outputBuffer,
           sum += *in++;
         }
 
+	if (sum < prevSum) {
+          sum = prevSum - 0.01;
+        }
+        prevSum = sum;
+
         sum /= (float) framesPerBuffer;
+	sum *= 4.0;
         int pwmVal = (int) std::abs(sum * 1024);
-        pwmWrite(PWM_PIN, pwmVal);
+	if ( pwmVal > 0 ) {
+          pwmWrite(PWM_PIN, pwmVal);
+        }
 
         std::cout << pwmVal << std::endl;
     }
