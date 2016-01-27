@@ -47,6 +47,11 @@
 #include <portaudio.h>
 #include <wiringPi.h>
 #include <cmath>
+#include <thread>
+
+#include <oscpack/osc/OscReceivedElements.h>
+#include <oscpack/osc/OscPacketListener.h>
+#include <oscpack/ip/UdpSocket.h>
 
 /*
 ** Note that many of the older ISA sound cards on PCs do NOT support
@@ -57,15 +62,16 @@
 #define PA_SAMPLE_TYPE      paFloat32
 #define FRAMES_PER_BUFFER   (64)
 #define PWM_PIN (18)
+#define PORT 3334
 
 typedef float SAMPLE;
 
+struct RpiState {
+  int program;
+  float level;
+};
+
 float CubicAmplifier( float input );
-static int fuzzCallback( const void *inputBuffer, void *outputBuffer,
-                         unsigned long framesPerBuffer,
-                         const PaStreamCallbackTimeInfo* timeInfo,
-                         PaStreamCallbackFlags statusFlags,
-                         void *userData );
 
 /* Non-linear amplifier with soft distortion curve. */
 float CubicAmplifier( float input )
@@ -86,59 +92,7 @@ float CubicAmplifier( float input )
 }
 #define FUZZ(x) CubicAmplifier(CubicAmplifier(CubicAmplifier(CubicAmplifier(x))))
 
-static int gNumNoInputs = 0;
 static float prevSum = 0.0;
-/* This routine will be called by the PortAudio engine when audio is needed.
-** It may be called at interrupt level on some machines so don't do anything
-** that could mess up the system like calling malloc() or free().
-*/
-static int fuzzCallback( const void *inputBuffer, void *outputBuffer,
-                         unsigned long framesPerBuffer,
-                         const PaStreamCallbackTimeInfo* timeInfo,
-                         PaStreamCallbackFlags statusFlags,
-                         void *userData )
-{
-    SAMPLE *out = (SAMPLE*)outputBuffer;
-    const SAMPLE *in = (const SAMPLE*)inputBuffer;
-    unsigned int i;
-    (void) timeInfo; /* Prevent unused variable warnings. */
-    (void) statusFlags;
-    (void) userData;
-
-    if( inputBuffer == NULL )
-    {
-        for( i=0; i<framesPerBuffer; i++ )
-        {
-            *out++ = 0;  /* left - silent */
-            *out++ = 0;  /* right - silent */
-        }
-        gNumNoInputs += 1;
-    }
-    else
-    {
-      float sum = 0;
-        for( i=0; i<framesPerBuffer; i++ )
-        {
-          sum += *in++;
-        }
-
-	if (sum < prevSum) {
-          sum = prevSum - 0.01;
-        }
-        prevSum = sum;
-
-        sum /= (float) framesPerBuffer;
-	sum *= 4.0;
-        int pwmVal = (int) std::abs(sum * 1024);
-	if ( pwmVal > 0 ) {
-          pwmWrite(PWM_PIN, pwmVal);
-        }
-
-        std::cout << pwmVal << std::endl;
-    }
-
-    return paContinue;
-}
 
 void error(int err) {
   Pa_Terminate();
@@ -147,13 +101,135 @@ void error(int err) {
   fprintf( stderr, "Error message: %s\n", Pa_GetErrorText( err ) );
 }
 
+class RpiPacketListener : public osc::OscPacketListener {
+public:
+  RpiPacketListener() {
+    mState = { 0, 0.2 };
+  }
+
+  virtual RpiState getState() {
+    return mState;
+  }
+
+protected:
+
+    virtual void ProcessMessage( const osc::ReceivedMessage& m, 
+				const IpEndpointName& remoteEndpoint )
+    {
+        (void) remoteEndpoint; // suppress unused parameter warning
+
+        std::cout << "received message" << std::endl;
+
+        try{
+            if( std::strcmp( m.AddressPattern(), "/rpi/program" ) == 0 ){
+                osc::ReceivedMessageArgumentStream args = m.ArgumentStream();
+                const char *a1;
+                args >> a1 >> osc::EndMessage;
+
+                std::string a1Str(a1);
+
+                std::cout << "received '/rpi/program' message with arguments: "
+                          << a1Str << std::endl;
+
+                int prog = a1Str == "audioReactive" ? 1 : 0;
+
+                mState = { prog, mState.level };
+            }else if( std::strcmp( m.AddressPattern(), "/rpi/lightLevel" ) == 0 ){
+              osc::ReceivedMessageArgumentStream args = m.ArgumentStream();
+              float a1;
+              args >> a1 >> osc::EndMessage;
+
+              std::cout << "received '/rpi/lightLevel' message with arguments: "
+                        << a1 << std::endl;
+
+              mState = { mState.program, a1 };
+            }
+        }catch( osc::Exception& e ){
+            // any parsing errors such as unexpected argument types, or 
+            // missing arguments get thrown as exceptions.
+            std::cout << "error while parsing message: "
+                << m.AddressPattern() << ": " << e.what() << "\n";
+        }
+    }
+
+private:
+  RpiState mState;
+};
+
+
 /*******************************************************************/
+
+    static RpiPacketListener listener;
+    static int gNumNoInputs = 0;
+    static float mPrevSum;
+  static int fuzzCallback( const void *inputBuffer, void *outputBuffer,
+                         unsigned long framesPerBuffer,
+                         const PaStreamCallbackTimeInfo* timeInfo,
+                         PaStreamCallbackFlags statusFlags,
+                         void *userData )
+  {
+      SAMPLE *out = (SAMPLE*)outputBuffer;
+      const SAMPLE *in = (const SAMPLE*)inputBuffer;
+      unsigned int i;
+      (void) timeInfo; /* Prevent unused variable warnings. */
+      (void) statusFlags;
+      (void) userData;
+
+      RpiState rpiState = listener.getState();
+
+      float sum = 0;
+
+      if (rpiState.program == 0) {
+        sum = 1.0;
+      }
+      else if( inputBuffer == NULL )
+      {
+          for( i=0; i<framesPerBuffer; i++ )
+          {
+              *out++ = 0;  /* left - silent */
+              *out++ = 0;  /* right - silent */
+          }
+          gNumNoInputs += 1;
+      }
+      else
+      {
+          for( i=0; i<framesPerBuffer; i++ )
+          {
+            sum += *in++;
+          }
+      }
+
+      if (sum < mPrevSum) {
+        sum = mPrevSum - 0.03;
+      }
+
+      mPrevSum = sum;
+
+      int pwmVal = (int) std::abs(sum * rpiState.level * 1024);
+
+      if ( pwmVal >= 0 ) {
+        pwmWrite(PWM_PIN, pwmVal);
+      }
+
+      sum /= (float) framesPerBuffer;
+      sum *= 4.0;
+
+      return paContinue;
+  }
+
+void startRpi() {
+  UdpListeningReceiveSocket s(IpEndpointName( IpEndpointName::ANY_ADDRESS, PORT ), &listener );
+  s.Run();
+}
+
 int main(void);
 int main(void)
 {
   // WiringPi
   wiringPiSetupGpio();
   pinMode(PWM_PIN, PWM_OUTPUT);
+
+  std::thread rpiThread(startRpi);
 
   //PA
     PaStreamParameters inputParameters;
@@ -173,6 +249,7 @@ int main(void)
     inputParameters.suggestedLatency = Pa_GetDeviceInfo( inputParameters.device )->defaultLowInputLatency;
     inputParameters.hostApiSpecificStreamInfo = NULL;
 
+
     err = Pa_OpenStream(
               &stream,
               &inputParameters,
@@ -182,6 +259,7 @@ int main(void)
               0, /* paClipOff, */  /* we won't output out of range samples so don't bother clipping them */
               fuzzCallback,
               NULL );
+
     if( err != paNoError ) error(err);
 
     err = Pa_StartStream( stream );
@@ -194,6 +272,10 @@ int main(void)
 
     printf("Finished. gNumNoInputs = %d\n", gNumNoInputs );
     Pa_Terminate();
+
+    rpiThread.join();
+
+
     return 0;
 
 }
