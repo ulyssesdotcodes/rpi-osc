@@ -195,24 +195,29 @@ private:
       {
           for( i=0; i<framesPerBuffer; i++ )
           {
-            sum += *in++;
+            sum += *in++ * 2.0;
           }
+      sum /= framesPerBuffer;
       }
 
+
       if (sum < mPrevSum) {
-        sum = mPrevSum - 0.03;
+        sum = mPrevSum * 0.99;
+      }
+
+      if (sum > 1.0) {
+        sum = 1.0;
       }
 
       mPrevSum = sum;
 
-      int pwmVal = (int) std::abs(sum * rpiState.level * 1024);
+      int pwmVal = (int) std::abs(sum * rpiState.level * 1525);
 
       if ( pwmVal >= 0 ) {
         pwmWrite(PWM_PIN, pwmVal);
       }
 
       sum /= (float) framesPerBuffer;
-      sum *= 4.0;
 
       return paContinue;
   }
